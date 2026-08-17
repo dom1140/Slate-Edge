@@ -76,6 +76,8 @@ def esc(value):
 
 if "refresh_nonce" not in st.session_state:
     st.session_state.refresh_nonce = 0
+if "quick_log_game" not in st.session_state:
+    st.session_state.quick_log_game = None
 
 st.markdown('<div class="topbar"><div class="brand">SLATE<span>EDGE</span></div><div class="live">● MLB v2</div></div>', unsafe_allow_html=True)
 
@@ -162,10 +164,51 @@ with tab_board:
             else:
                 st.caption("Research output only. Exact stakes remain locked until the unseen-season validation gate passes.")
             if r.simulated and r.stake > 0:
-                st.caption("Simulation only; this stake cannot be logged as an approved wager.")
-            if r.stake > 0 and not r.simulated and st.button(f"Log {r.selection} · ${r.stake:.2f}", key=f"log-{g.id}-{r.selection}"):
-                store.add(placed_at=datetime.now(timezone.utc).isoformat(), sport=g.sport, event=f"{g.away.name} @ {g.home.name}", selection=r.selection, market="Moneyline", sportsbook=r.sportsbook, odds=r.odds, stake=r.stake, model_probability=r.model_probability, edge=r.edge, notes="Logged from decision board")
-                st.success("Bet added to portfolio.")
+                st.caption("Simulation only; the displayed stake is a paper-test suggestion.")
+
+        if st.button("＋ Log Bet", key=f"quick-log-{g.id}-{r.selection}", use_container_width=True):
+            st.session_state.quick_log_game = f"{g.id}-{r.selection}"
+
+        if st.session_state.quick_log_game == f"{g.id}-{r.selection}":
+            event_value = f"{g.away.name} @ {g.home.name}"
+            suggested_stake = float(r.stake) if r.stake > 0 else 10.0
+            with st.form(f"quick-log-form-{g.id}-{r.selection}", clear_on_submit=False):
+                st.markdown(f"#### Log {r.selection}")
+                q1, q2 = st.columns(2)
+                quick_selection = q1.text_input("Pick", value=r.selection)
+                quick_market = q2.text_input("Market", value="Moneyline")
+                q3, q4, q5 = st.columns(3)
+                quick_odds = q3.number_input("Actual odds", value=int(r.odds), step=5)
+                quick_stake = q4.number_input("Amount bet", min_value=0.01, value=suggested_stake, step=1.0)
+                quick_book = q5.text_input("Sportsbook", value=r.sportsbook)
+                quick_notes = st.text_area("Notes", value="Logged from Today’s Slate")
+                submitted = st.form_submit_button("Add to Logbook", use_container_width=True)
+                if submitted:
+                    history = store.frame()
+                    duplicate = (not history.empty and (
+                        (history["event"] == event_value) &
+                        (history["selection"] == quick_selection) &
+                        (history["market"] == quick_market) &
+                        (history["result"] == "OPEN")
+                    ).any())
+                    if duplicate:
+                        st.error("This bet is already open in your Logbook.")
+                    else:
+                        store.add(
+                            placed_at=datetime.now(timezone.utc).isoformat(),
+                            sport=g.sport,
+                            event=event_value,
+                            selection=quick_selection,
+                            market=quick_market,
+                            sportsbook=quick_book,
+                            odds=int(quick_odds),
+                            stake=float(quick_stake),
+                            model_probability=r.model_probability,
+                            edge=r.edge,
+                            notes=quick_notes,
+                        )
+                        st.session_state.quick_log_game = None
+                        st.success("Bet added to Logbook.")
 
 with tab_markets:
     st.subheader("Game totals & player props")
