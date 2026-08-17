@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from slate_edge.domain import Game, OddsQuote, Recommendation
+from slate_edge.predictive import ModelContext
 
 
 def implied_probability(odds: int) -> float:
@@ -23,7 +24,8 @@ def kelly(probability: float, odds: int) -> float:
 
 
 def build_recommendations(games: list[Game], quotes: list[OddsQuote], bankroll: float, fraction: float,
-                          max_bet_pct: float, max_slate_pct: float, min_edge: float) -> list[Recommendation]:
+                          max_bet_pct: float, max_slate_pct: float, min_edge: float,
+                          model: ModelContext | None = None) -> list[Recommendation]:
     by_game: dict[str, list[OddsQuote]] = defaultdict(list)
     for quote in quotes:
         by_game[quote.game_id].append(quote)
@@ -40,30 +42,35 @@ def build_recommendations(games: list[Game], quotes: list[OddsQuote], bankroll: 
             continue
         home_q, away_q = best[game.home.name], best[game.away.name]
         home_market, away_market = no_vig_probabilities(home_q.american_odds, away_q.american_odds)
-        # Transparent baseline model: no-vig market plus small, bounded context adjustments.
-        adjustment = 0.0
-        reasons = ["Consensus no-vig market baseline"]
-        if game.home_pitcher.confirmed and not game.away_pitcher.confirmed:
-            adjustment += .012; reasons.append("Home probable pitcher confirmed")
-        elif game.away_pitcher.confirmed and not game.home_pitcher.confirmed:
-            adjustment -= .012; reasons.append("Away probable pitcher confirmed")
-        if game.home_lineup_status == "CONFIRMED" and game.away_lineup_status != "CONFIRMED":
-            adjustment += .006; reasons.append("Home lineup confirmed first")
-        elif game.away_lineup_status == "CONFIRMED" and game.home_lineup_status != "CONFIRMED":
-            adjustment -= .006; reasons.append("Away lineup confirmed first")
-        # Home-field prior is conservative because the market already contains most of it.
-        adjustment += .004
+        model_ready = bool(model and model.validated and model.coefficients)
+        if model_ready:
+            home_model = model.home_probability(home_market, game.home.id, game.away.id)
+            reasons = [f"Validated model {model.version}", "Consensus no-vig market input",
+                       "Frozen market/Elo/run-strength coefficients"]
+        else:
+            # Research-only baseline. It may display diagnostics, but the wagering gate below forces PASS.
+            adjustment = .004
+            reasons = ["Research baseline — wagering locked", "Consensus no-vig market baseline"]
+            if game.home_pitcher.confirmed and not game.away_pitcher.confirmed:
+                adjustment += .012; reasons.append("Home probable pitcher confirmed")
+            elif game.away_pitcher.confirmed and not game.home_pitcher.confirmed:
+                adjustment -= .012; reasons.append("Away probable pitcher confirmed")
+            if game.home_lineup_status == "CONFIRMED" and game.away_lineup_status != "CONFIRMED":
+                adjustment += .006; reasons.append("Home lineup confirmed first")
+            elif game.away_lineup_status == "CONFIRMED" and game.home_lineup_status != "CONFIRMED":
+                adjustment -= .006; reasons.append("Away lineup confirmed first")
+            home_model = min(.95, max(.05, home_market + adjustment))
         for selection, quote, market_p, model_p in [
-            (game.home.name, home_q, home_market, min(.95, max(.05, home_market + adjustment))),
-            (game.away.name, away_q, away_market, min(.95, max(.05, away_market - adjustment))),
+            (game.home.name, home_q, home_market, home_model),
+            (game.away.name, away_q, away_market, 1 - home_model),
         ]:
             edge = model_p - market_p
             ev = model_p * (decimal_odds(quote.american_odds) - 1) - (1 - model_p)
             full_kelly = kelly(model_p, quote.american_odds)
-            raw_stake = bankroll * full_kelly * fraction if edge >= min_edge else 0
+            raw_stake = bankroll * full_kelly * fraction if model_ready and edge >= min_edge else 0
             stake = round(min(raw_stake, bankroll * max_bet_pct), 2)
             grade = "A" if edge >= .06 else "B" if edge >= .04 else "C" if edge >= min_edge else "PASS"
-            confidence = "Confirmed" if game.home_lineup_status == game.away_lineup_status == "CONFIRMED" else "Pre-lineup"
+            confidence = "Validated" if model_ready else "Research only"
             recs.append(Recommendation(game, selection, quote.american_odds, quote.sportsbook, market_p, model_p,
                                        edge, ev, full_kelly, stake, grade, confidence, reasons.copy(), quote.fetched_at))
     recs.sort(key=lambda r: (r.stake > 0, r.expected_value), reverse=True)
@@ -74,4 +81,3 @@ def build_recommendations(games: list[Game], quotes: list[OddsQuote], bankroll: 
         for r in recs:
             r.stake = round(r.stake * scale, 2)
     return recs
-
