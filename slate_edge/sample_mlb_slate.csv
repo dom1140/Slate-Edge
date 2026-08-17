@@ -1,0 +1,9 @@
+sport,event_date,event,market,selection,odds,opposite_odds,model_prob
+MLB,2026-08-17,BAL Orioles at TB Rays,Moneyline,TB Rays,-165,135,0.635
+MLB,2026-08-17,MIA Marlins at PHI Phillies,Moneyline,PHI Phillies,-245,200,0.725
+MLB,2026-08-17,DET Tigers at PIT Pirates,Moneyline,DET Tigers,-120,100,0.585
+MLB,2026-08-17,SD Padres at NY Mets,Moneyline,NY Mets,-120,100,0.575
+MLB,2026-08-17,ARI Diamondbacks at BOS Red Sox,Moneyline,BOS Red Sox,-165,135,0.625
+MLB,2026-08-17,Athletics at KC Royals,Moneyline,KC Royals,-190,155,0.665
+MLB,2026-08-17,ATL Braves at MIN Twins,Moneyline,ATL Braves,-125,105,0.590
+MLB,2026-08-17,CHI White Sox at CHI Cubs,Moneyline,CHI Cubs,-170,140,0.635
