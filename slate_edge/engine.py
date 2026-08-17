@@ -25,7 +25,7 @@ def kelly(probability: float, odds: int) -> float:
 
 def build_recommendations(games: list[Game], quotes: list[OddsQuote], bankroll: float, fraction: float,
                           max_bet_pct: float, max_slate_pct: float, min_edge: float,
-                          model: ModelContext | None = None) -> list[Recommendation]:
+                          model: ModelContext | None = None, paper_test: bool = False) -> list[Recommendation]:
     by_game: dict[str, list[OddsQuote]] = defaultdict(list)
     for quote in quotes:
         by_game[quote.game_id].append(quote)
@@ -42,10 +42,12 @@ def build_recommendations(games: list[Game], quotes: list[OddsQuote], bankroll: 
             continue
         home_q, away_q = best[game.home.name], best[game.away.name]
         home_market, away_market = no_vig_probabilities(home_q.american_odds, away_q.american_odds)
-        model_ready = bool(model and model.validated and model.coefficients)
-        if model_ready:
+        prediction_available = bool(model and model.coefficients)
+        model_ready = bool(prediction_available and model.validated)
+        if prediction_available:
             home_model = model.home_probability(home_market, game.home.id, game.away.id)
-            reasons = [f"Validated model {model.version}", "Consensus no-vig market input",
+            status = "Validated" if model_ready else "Unvalidated paper-test"
+            reasons = [f"{status} model {model.version}", "Consensus no-vig market input",
                        "Frozen market/Elo/run-strength coefficients"]
         else:
             # Research-only baseline. It may display diagnostics, but the wagering gate below forces PASS.
@@ -67,12 +69,14 @@ def build_recommendations(games: list[Game], quotes: list[OddsQuote], bankroll: 
             edge = model_p - market_p
             ev = model_p * (decimal_odds(quote.american_odds) - 1) - (1 - model_p)
             full_kelly = kelly(model_p, quote.american_odds)
-            raw_stake = bankroll * full_kelly * fraction if model_ready and edge >= min_edge else 0
+            sizing_enabled = model_ready or (paper_test and prediction_available)
+            raw_stake = bankroll * full_kelly * fraction if sizing_enabled and edge >= min_edge and ev > 0 else 0
             stake = round(min(raw_stake, bankroll * max_bet_pct), 2)
             grade = "A" if edge >= .06 else "B" if edge >= .04 else "C" if edge >= min_edge else "PASS"
-            confidence = "Validated" if model_ready else "Research only"
+            confidence = "Validated" if model_ready else "Aggressive paper" if paper_test else "Research only"
             recs.append(Recommendation(game, selection, quote.american_odds, quote.sportsbook, market_p, model_p,
-                                       edge, ev, full_kelly, stake, grade, confidence, reasons.copy(), quote.fetched_at))
+                                       edge, ev, full_kelly, stake, grade, confidence, reasons.copy(), quote.fetched_at,
+                                       paper_test and not model_ready))
     recs.sort(key=lambda r: (r.stake > 0, r.expected_value), reverse=True)
     cap = bankroll * max_slate_pct
     total = sum(r.stake for r in recs)

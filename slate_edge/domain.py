@@ -80,4 +80,4 @@ class Recommendation:
     confidence: str
     reasons: list[str]
     quote_fetched_at: datetime | None
-
+    simulated: bool = False
