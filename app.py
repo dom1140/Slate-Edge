@@ -4,14 +4,16 @@ from datetime import date, datetime, timezone
 import html
 import os
 from pathlib import Path
+from statistics import median, pstdev
 import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
 
-from slate_edge.engine import build_recommendations, decimal_odds
+from slate_edge.engine import build_recommendations, decimal_odds, implied_probability
 from slate_edge.providers.mlb import MLBLineupProvider, MLBStatsProvider
 from slate_edge.providers.odds import DemoOddsProvider, TheOddsAPIProvider
+from slate_edge.providers.recent_form import MLBRecentFormProvider
 from slate_edge.providers.weather import OpenMeteoProvider
 from slate_edge.predictive import load_model, update_current_season
 from slate_edge.storage import BetStore, clv_percent
@@ -92,7 +94,7 @@ with st.sidebar:
     min_edge = st.slider("Minimum edge", .0, .10, .025, .005, format="%.3f")
     st.caption("Stake recommendations are sizing outputs, not guarantees. Set limits you can afford to lose.")
 
-tab_board, tab_portfolio, tab_log, tab_data = st.tabs(["Today", "Portfolio", "Log bet", "Data desk"])
+tab_board, tab_markets, tab_portfolio, tab_log, tab_data = st.tabs(["Today", "Totals & props", "Portfolio", "Log bet", "Data desk"])
 
 with tab_board:
     st.markdown('<section class="hero"><div class="eyebrow">Decision desk · MLB</div><h1>Today’s slate, ranked by edge.</h1><div class="sub">Live schedule context, best available moneyline, transparent probability baseline, and bankroll-aware sizing in one scan.</div></section>', unsafe_allow_html=True)
@@ -164,6 +166,118 @@ with tab_board:
             if r.stake > 0 and not r.simulated and st.button(f"Log {r.selection} · ${r.stake:.2f}", key=f"log-{g.id}-{r.selection}"):
                 store.add(placed_at=datetime.now(timezone.utc).isoformat(), sport=g.sport, event=f"{g.away.name} @ {g.home.name}", selection=r.selection, market="Moneyline", sportsbook=r.sportsbook, odds=r.odds, stake=r.stake, model_probability=r.model_probability, edge=r.edge, notes="Logged from decision board")
                 st.success("Bet added to portfolio.")
+
+with tab_markets:
+    st.subheader("Game totals & player props")
+    st.caption("Live line-shopping only. Totals and props do not inherit the moneyline model or its validation status.")
+    totals = [q for q in quotes if q.market == "total"] if "quotes" in locals() else []
+    game_lookup = {g.id: g for g in games} if "games" in locals() else {}
+    def consensus_signal(all_quotes, target):
+        pairs = {}
+        for item in all_quotes:
+            key = item.sportsbook
+            pairs.setdefault(key, {})[item.selection] = item
+        probabilities = []
+        for sides in pairs.values():
+            if "Over" in sides and "Under" in sides:
+                over, under = implied_probability(sides["Over"].american_odds), implied_probability(sides["Under"].american_odds)
+                probabilities.append((over if target.selection == "Over" else under) / (over + under))
+        if not probabilities:
+            return None, 0, None, None
+        fair = median(probabilities)
+        price_edge = fair * decimal_odds(target.american_odds) - 1
+        disagreement = pstdev(probabilities) if len(probabilities) > 1 else 0.0
+        return fair, len(probabilities), price_edge, disagreement
+
+    total_rows = []
+    grouped_totals = {}
+    for q in totals:
+        key = (q.game_id, q.point, q.selection)
+        if key not in grouped_totals or q.american_odds > grouped_totals[key].american_odds:
+            grouped_totals[key] = q
+    for (game_id, point, side), q in grouped_totals.items():
+        game = game_lookup.get(game_id)
+        comparable = [item for item in totals if item.game_id == game_id and item.point == point]
+        fair, books, price_edge, disagreement = consensus_signal(comparable, q)
+        total_rows.append({"Game": f"{game.away.abbreviation} @ {game.home.abbreviation}" if game else game_id,
+                           "Side": side, "Total": point, "Best odds": fmt_odds(q.american_odds),
+                           "Sportsbook": q.sportsbook, "Consensus": f"{fair:.1%}" if fair is not None else "—",
+                           "Books": books, "Price edge": f"{price_edge:+.1%}" if price_edge is not None else "—",
+                           "Disagreement": f"{disagreement:.1%}" if disagreement is not None else "—",
+                           "Updated": age_label(q.fetched_at),
+                           "Status": "PRICE EDGE" if books >= 3 and price_edge is not None and price_edge >= .01 else "MARKET ONLY"})
+    st.markdown("#### Full-game totals")
+    if total_rows:
+        st.dataframe(pd.DataFrame(total_rows).sort_values(["Game", "Total", "Side"]), hide_index=True, use_container_width=True)
+    else:
+        st.info("No full-game totals are currently posted for this slate.")
+
+    st.markdown("#### Selected player props")
+    st.caption("One manual load scans four markets for each scheduled game. Results are cached for 30 minutes to protect API credits.")
+
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def load_props_cached(day_iso: str, odds_key_value: str, game_signature: tuple):
+        if not odds_key_value:
+            return [], "Live API key required"
+        try:
+            return TheOddsAPIProvider(odds_key_value).prop_quotes(games), ""
+        except Exception as exc:
+            return [], str(exc)
+
+    if st.button("Load / refresh player props", use_container_width=True, disabled=not bool(odds_key)):
+        with st.spinner("Scanning selected props across today’s games…"):
+            signature = tuple((g.id, g.away.name, g.home.name) for g in games)
+            st.session_state["prop_quotes"], st.session_state["prop_error"] = load_props_cached(
+                slate_date.isoformat(), odds_key, signature)
+    prop_quotes = st.session_state.get("prop_quotes", [])
+    prop_error = st.session_state.get("prop_error", "")
+    if prop_error:
+        st.warning(f"Player props unavailable: {prop_error}")
+    prop_rows, best_props = [], {}
+    for q in prop_quotes:
+        key = (q.game_id, q.market, q.participant, q.point, q.selection)
+        if key not in best_props or q.american_odds > best_props[key].american_odds:
+            best_props[key] = q
+    labels = {"pitcher_strikeouts":"Pitcher strikeouts", "pitcher_outs":"Pitcher outs",
+              "batter_hits":"Batter hits", "batter_total_bases":"Batter total bases"}
+
+    @st.cache_data(ttl=21600, show_spinner=False)
+    def load_recent_form(requests_tuple: tuple, season: int):
+        return MLBRecentFormProvider().forms(list(requests_tuple), season)
+
+    if prop_quotes and st.button("Add Last 5 form (free MLB data)", use_container_width=True):
+        requests_tuple = tuple(sorted({(q.participant, q.market) for q in prop_quotes if q.participant}))
+        with st.spinner("Loading official MLB game logs…"):
+            st.session_state["recent_forms"] = load_recent_form(requests_tuple, slate_date.year)
+    recent_forms = st.session_state.get("recent_forms", {})
+    for (game_id, market, player, point, side), q in best_props.items():
+        game = game_lookup.get(game_id)
+        comparable = [item for item in prop_quotes if item.game_id == game_id and item.market == market and
+                      item.participant == player and item.point == point]
+        fair, books, price_edge, disagreement = consensus_signal(comparable, q)
+        form = recent_forms.get((player, market))
+        last_values = form.last_five if form else []
+        last5_rate = form.hit_rate(float(point), side, 5) if form and point is not None else None
+        season_rate = form.hit_rate(float(point), side) if form and point is not None else None
+        prop_rows.append({"Game": f"{game.away.abbreviation} @ {game.home.abbreviation}" if game else game_id,
+                          "Market": labels.get(market, market), "Player": player or "Unknown", "Side": side,
+                          "Line": point, "Best odds": fmt_odds(q.american_odds), "Sportsbook": q.sportsbook,
+                          "Last 5": " · ".join(f"{v:g}" for v in last_values) if last_values else "—",
+                          "L5 hit": f"{last5_rate:.0%}" if last5_rate is not None else "—",
+                          "L5 avg": f"{form.last_five_average:.2f}" if form and form.last_five_average is not None else "—",
+                          "Season avg": f"{form.season_average:.2f}" if form and form.season_average is not None else "—",
+                          "Season hit": f"{season_rate:.0%}" if season_rate is not None else "—",
+                          "Consensus": f"{fair:.1%}" if fair is not None else "—", "Books": books,
+                          "Price edge": f"{price_edge:+.1%}" if price_edge is not None else "—",
+                          "Disagreement": f"{disagreement:.1%}" if disagreement is not None else "—",
+                          "Updated": age_label(q.fetched_at),
+                          "Status": "PRICE EDGE" if books >= 3 and price_edge is not None and price_edge >= .01 else "MARKET ONLY"})
+    if prop_rows:
+        st.dataframe(pd.DataFrame(prop_rows).sort_values(["Game", "Market", "Player", "Line", "Side"]),
+                     hide_index=True, use_container_width=True)
+    else:
+        st.info("Press the button to load available props. Markets typically appear closer to first pitch.")
+    st.caption("Last-5 and season hit rates are descriptive samples, not independent evidence of an edge. Price edge compares the best available price with the median no-vig market at the same line; three or more books are required before highlighting it.")
 
 with tab_portfolio:
     st.subheader("Performance & CLV")
