@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 import requests
 from slate_edge.domain import Game, Weather
 
@@ -37,6 +37,8 @@ class OpenMeteoProvider:
                 game.weather = Weather(data["temperature_2m"][idx], data["wind_speed_10m"][idx], data["precipitation_probability"][idx], "Forecast", datetime.now(timezone.utc))
             except (requests.RequestException, KeyError, ValueError):
                 pass
-        with ThreadPoolExecutor(max_workers=min(8, max(1, len(games)))) as pool:
-            list(pool.map(enrich_game, games))
+        pool = ThreadPoolExecutor(max_workers=min(8, max(1, len(games))))
+        futures = [pool.submit(enrich_game, game) for game in games]
+        wait(futures, timeout=7)
+        pool.shutdown(wait=False, cancel_futures=True)
         return games

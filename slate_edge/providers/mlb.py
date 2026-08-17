@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 import requests
 
 from slate_edge.domain import Game, Pitcher, Team
@@ -71,6 +71,8 @@ class MLBLineupProvider:
                     game.lineup_note = "Official batting order posted" if len(away_order) >= 9 and len(home_order) >= 9 else "One lineup posted; monitoring the other"
             except (requests.RequestException, ValueError):
                 game.lineup_note = "Lineup feed temporarily unavailable"
-        with ThreadPoolExecutor(max_workers=min(8, max(1, len(games)))) as pool:
-            list(pool.map(enrich_game, games))
+        pool = ThreadPoolExecutor(max_workers=min(8, max(1, len(games))))
+        futures = [pool.submit(enrich_game, game) for game in games]
+        wait(futures, timeout=7)
+        pool.shutdown(wait=False, cancel_futures=True)
         return games
