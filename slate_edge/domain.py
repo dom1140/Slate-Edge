@@ -41,6 +41,7 @@ class OddsQuote:
     american_odds: int
     fetched_at: datetime
     point: float | None = None
+    participant: str | None = None
 
 
 @dataclass
