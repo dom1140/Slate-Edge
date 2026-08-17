@@ -1,0 +1,24 @@
+name: Purge licensed historical source data
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Remove historical odds from every Git revision
+        run: |
+          git config user.name "slateedge-privacy-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git filter-branch --force --index-filter \
+            'git rm -r --cached --ignore-unmatch data/historical_odds' \
+            --prune-empty --tag-name-filter cat -- --all
+          git push origin --force --all
+          git push origin --force --tags

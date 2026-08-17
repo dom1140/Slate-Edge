@@ -15,16 +15,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Restore private historical cache
+        uses: actions/cache@v4
+        with:
+          path: data/historical_odds
+          key: mlb-historical-odds-v1-${{ runner.os }}
       - run: pip install numpy requests
       - name: Train with paid historical closing snapshots
         env:
           HISTORICAL_ODDS_API_KEY: ${{ secrets.HISTORICAL_ODDS_API_KEY }}
         run: python scripts/train_model.py --train-year 2024 --test-year 2025
-      - name: Commit versioned artifact and reusable normalized cache
+      - name: Commit versioned model artifact only
         run: |
           git config user.name "slateedge-model-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add model_artifact.json data/historical_odds
+          git add model_artifact.json
           git commit -m "Train and validate MLB model" || exit 0
           git push
 
