@@ -79,10 +79,16 @@ st.markdown('<div class="topbar"><div class="brand">SLATE<span>EDGE</span></div>
 
 with st.sidebar:
     st.header("Risk controls")
+    paper_test = st.toggle("Aggressive paper test", value=False,
+                           help="Simulates aggressive stakes. It never unlocks real-money recommendations.")
     bankroll = st.number_input("Current bankroll", min_value=10.0, value=float(secret("STARTING_BANKROLL", 1000)), step=50.0)
-    kelly_fraction = st.select_slider("Fractional Kelly", options=[.10, .20, .25, .33, .50], value=.25, format_func=lambda x:f"{x:.0%}")
-    max_bet_pct = st.slider("Max single bet", .005, .05, .015, .005, format="%.3f")
-    max_slate_pct = st.slider("Max slate exposure", .01, .15, .06, .01, format="%.2f")
+    if paper_test:
+        kelly_fraction, max_bet_pct, max_slate_pct = .50, .02, .08
+        st.warning("PAPER ONLY · 50% Kelly · 2% max bet · 8% slate cap · stop after a 20% drawdown")
+    else:
+        kelly_fraction = st.select_slider("Fractional Kelly", options=[.10, .20, .25, .33, .50], value=.25, format_func=lambda x:f"{x:.0%}")
+        max_bet_pct = st.slider("Max single bet", .005, .05, .015, .005, format="%.3f")
+        max_slate_pct = st.slider("Max slate exposure", .01, .15, .06, .01, format="%.2f")
     min_edge = st.slider("Minimum edge", .0, .10, .025, .005, format="%.3f")
     st.caption("Stake recommendations are sizing outputs, not guarantees. Set limits you can afford to lose.")
 
@@ -121,14 +127,17 @@ with tab_board:
     with st.spinner("Building today’s decision board…"):
         games, quotes, errors, is_demo = load_slate(slate_date.isoformat(), odds_key, st.session_state.refresh_nonce)
     model_context = update_current_season(load_model(MODEL_PATH), slate_date.year)
-    recs = build_recommendations(games, quotes, bankroll, kelly_fraction, max_bet_pct, max_slate_pct, min_edge, model_context)
+    recs = build_recommendations(games, quotes, bankroll, kelly_fraction, max_bet_pct, max_slate_pct, min_edge,
+                                 model_context, paper_test=paper_test)
     qualifying = [r for r in recs if r.stake > 0]
     freshest = max((q.fetched_at for q in quotes), default=None)
     m1,m2,m3,m4 = st.columns(4)
     m1.metric("Games", len(games)); m2.metric("Qualified plays", len(qualifying)); m3.metric("Total exposure", f"${sum(r.stake for r in qualifying):,.2f}"); m4.metric("Odds updated", age_label(freshest))
     if is_demo:
         st.markdown('<div class="warning">Demo odds are active. Add ODDS_API_KEY before treating prices, edges, EV, or stakes as live.</div>', unsafe_allow_html=True)
-    if not model_context.validated:
+    if paper_test and not model_context.validated:
+        st.markdown('<div class="warning">AGGRESSIVE PAPER TEST · Every displayed stake is simulated. No recommendation is approved for real money.</div>', unsafe_allow_html=True)
+    elif not model_context.validated:
         st.markdown(f'<div class="warning">RESEARCH MODE · Wager sizing is locked. {esc(model_context.reason)}</div>', unsafe_allow_html=True)
     else:
         st.success(f"Validated model active · {model_context.version} · unseen-season gate passed")
@@ -141,7 +150,8 @@ with tab_board:
         g = r.game
         lineup_class = "confirmed" if g.home_lineup_status == g.away_lineup_status == "CONFIRMED" else "projected"
         weather = "Weather pending" if g.weather.temperature_f is None else f"{g.weather.temperature_f:.0f}°F · wind {g.weather.wind_mph:.0f} mph · rain {g.weather.precipitation_probability:.0f}%"
-        card = f'''<article class="gamecard"><div class="gamehead"><span>{g.start_time.astimezone().strftime('%-I:%M %p') if os.name != 'nt' else g.start_time.astimezone().strftime('%I:%M %p').lstrip('0')} · {esc(g.venue)}</span><span>Odds {age_label(r.quote_fetched_at)}</span></div><div class="match">{esc(g.away.abbreviation)} <span style="color:#60786e">@</span> {esc(g.home.abbreviation)} · <span class="pick">{esc(r.selection)}</span></div><div style="color:#91a59d;font-size:13px">{esc(g.away_pitcher.name)} vs {esc(g.home_pitcher.name)} · {esc(weather)}</div><div class="chips"><span class="chip {lineup_class}">{esc(g.away.abbreviation)} {esc(g.away_lineup_status)}</span><span class="chip {lineup_class}">{esc(g.home.abbreviation)} {esc(g.home_lineup_status)}</span><span class="chip">{esc(r.sportsbook)}</span><span class="chip">{esc(r.confidence)}</span></div><div class="grid5"><div class="datum"><small>Best line</small><b>{fmt_odds(r.odds)}</b></div><div class="datum"><small>Market</small><b>{r.market_probability:.1%}</b></div><div class="datum"><small>Model</small><b>{r.model_probability:.1%}</b></div><div class="datum"><small>Edge / EV</small><b>{r.edge:+.1%} / {r.expected_value:+.1%}</b></div><div class="datum"><small>{r.grade} · Stake</small><b class="stake">{'PASS' if r.stake <= 0 else f'${r.stake:,.2f}'}</b></div></div></article>'''
+        stake_label = "PASS" if r.stake <= 0 else f"PAPER ${r.stake:,.2f}" if r.simulated else f"${r.stake:,.2f}"
+        card = f'''<article class="gamecard"><div class="gamehead"><span>{g.start_time.astimezone().strftime('%-I:%M %p') if os.name != 'nt' else g.start_time.astimezone().strftime('%I:%M %p').lstrip('0')} · {esc(g.venue)}</span><span>Odds {age_label(r.quote_fetched_at)}</span></div><div class="match">{esc(g.away.abbreviation)} <span style="color:#60786e">@</span> {esc(g.home.abbreviation)} · <span class="pick">{esc(r.selection)}</span></div><div style="color:#91a59d;font-size:13px">{esc(g.away_pitcher.name)} vs {esc(g.home_pitcher.name)} · {esc(weather)}</div><div class="chips"><span class="chip {lineup_class}">{esc(g.away.abbreviation)} {esc(g.away_lineup_status)}</span><span class="chip {lineup_class}">{esc(g.home.abbreviation)} {esc(g.home_lineup_status)}</span><span class="chip">{esc(r.sportsbook)}</span><span class="chip">{esc(r.confidence)}</span></div><div class="grid5"><div class="datum"><small>Best line</small><b>{fmt_odds(r.odds)}</b></div><div class="datum"><small>Market</small><b>{r.market_probability:.1%}</b></div><div class="datum"><small>Model</small><b>{r.model_probability:.1%}</b></div><div class="datum"><small>Edge / EV</small><b>{r.edge:+.1%} / {r.expected_value:+.1%}</b></div><div class="datum"><small>{r.grade} · Stake</small><b class="stake">{stake_label}</b></div></div></article>'''
         st.markdown(card, unsafe_allow_html=True)
         with st.expander("Why this number"):
             st.write(" • ".join(r.reasons))
@@ -149,7 +159,9 @@ with tab_board:
                 st.caption(f"Holdout metrics: {model_context.metrics}. Historical results do not guarantee future performance.")
             else:
                 st.caption("Research output only. Exact stakes remain locked until the unseen-season validation gate passes.")
-            if r.stake > 0 and st.button(f"Log {r.selection} · ${r.stake:.2f}", key=f"log-{g.id}-{r.selection}"):
+            if r.simulated and r.stake > 0:
+                st.caption("Simulation only; this stake cannot be logged as an approved wager.")
+            if r.stake > 0 and not r.simulated and st.button(f"Log {r.selection} · ${r.stake:.2f}", key=f"log-{g.id}-{r.selection}"):
                 store.add(placed_at=datetime.now(timezone.utc).isoformat(), sport=g.sport, event=f"{g.away.name} @ {g.home.name}", selection=r.selection, market="Moneyline", sportsbook=r.sportsbook, odds=r.odds, stake=r.stake, model_probability=r.model_probability, edge=r.edge, notes="Logged from decision board")
                 st.success("Bet added to portfolio.")
 
