@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import time
+from statistics import median
 
 import numpy as np
 import requests
@@ -55,26 +56,48 @@ def fetch_results(year: int) -> list[dict]:
     return games
 
 
-def quote_from_event(event: dict) -> dict | None:
+MAX_QUOTE_AGE_MINUTES = 360
+MIN_BOOKS = 3
+
+
+def quote_from_event(event: dict, snapshot: datetime | None = None) -> dict | None:
+    """Build a robust consensus and executable prices from fresh, non-outlier books."""
     pairs = []
     for book in event.get("bookmakers", []):
+        updated_raw = book.get("last_update")
+        if snapshot and updated_raw:
+            updated = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+            if updated > snapshot or snapshot - updated > timedelta(minutes=MAX_QUOTE_AGE_MINUTES):
+                continue
         for market in book.get("markets", []):
             if market.get("key") != "h2h": continue
             outcomes = {o["name"]: int(o["price"]) for o in market.get("outcomes", [])}
             home, away = event.get("home_team"), event.get("away_team")
             if home in outcomes and away in outcomes:
                 hp, ap = implied(outcomes[home]), implied(outcomes[away])
-                pairs.append((hp / (hp + ap), outcomes[home], outcomes[away], book.get("title", book.get("key"))))
-    if not pairs: return None
-    # Median no-vig probability is more stable than choosing one historical book.
-    pairs.sort(key=lambda x: x[0]); mid = pairs[len(pairs)//2]
-    best_home = max(p[1] for p in pairs); best_away = max(p[2] for p in pairs)
-    return {"market_home": mid[0], "home_odds": best_home, "away_odds": best_away, "books": len(pairs)}
+                pairs.append((hp / (hp + ap), outcomes[home], outcomes[away], book.get("title", book.get("key")), updated_raw))
+    if len(pairs) < MIN_BOOKS:
+        return None
+    center = median(p[0] for p in pairs)
+    # Remove prices whose no-vig view is far from the market center. This prevents
+    # stale/error quotes from becoming a fictitious executable best price.
+    filtered = [p for p in pairs if abs(p[0] - center) <= .035]
+    if len(filtered) < MIN_BOOKS:
+        return None
+    consensus = median(p[0] for p in filtered)
+    # Require the offered side price itself to be reasonably consistent with consensus.
+    executable = [p for p in filtered if abs(implied(p[1]) - consensus) <= .08 and
+                  abs(implied(p[2]) - (1 - consensus)) <= .08]
+    if len(executable) < MIN_BOOKS:
+        return None
+    best_home = max(p[1] for p in executable); best_away = max(p[2] for p in executable)
+    return {"market_home": consensus, "home_odds": best_home, "away_odds": best_away,
+            "books": len(executable), "consensus_books": sorted({p[3] for p in executable})}
 
 
-def fetch_season_odds(year: int, api_key: str, cache_dir: Path) -> dict[tuple[str, str], dict]:
+def fetch_season_odds(year: int, api_key: str, cache_dir: Path) -> list[dict]:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    latest: dict[tuple[str, str], dict] = {}
+    latest: dict[str, dict] = {}
     for day in date_range(year):
         for hour in (15, 19, 23):
             stamp = day.replace(hour=hour).isoformat().replace("+00:00", "Z")
@@ -88,12 +111,31 @@ def fetch_season_odds(year: int, api_key: str, cache_dir: Path) -> dict[tuple[st
                 commence = datetime.fromisoformat(event["commence_time"].replace("Z", "+00:00"))
                 snapshot = datetime.fromisoformat(payload["timestamp"].replace("Z", "+00:00"))
                 if snapshot >= commence: continue
-                quote = quote_from_event(event)
+                # A quote must be pregame and close enough to represent the intended
+                # decision window, not an arbitrary morning number.
+                if commence - snapshot > timedelta(hours=8): continue
+                quote = quote_from_event(event, snapshot)
                 if not quote: continue
-                key = (event["home_team"], event["away_team"])
-                if key not in latest or latest[key]["snapshot"] < payload["timestamp"]:
-                    latest[key] = {**quote, "snapshot": payload["timestamp"], "commence": event["commence_time"]}
-    return latest
+                event_id = str(event.get("id") or f'{event["home_team"]}|{event["away_team"]}|{event["commence_time"]}')
+                if event_id not in latest or latest[event_id]["snapshot"] < payload["timestamp"]:
+                    latest[event_id] = {**quote, "event_id": event_id, "home": event["home_team"],
+                                        "away": event["away_team"], "snapshot": payload["timestamp"],
+                                        "commence": event["commence_time"]}
+    return list(latest.values())
+
+
+def match_quote(game: dict, quotes: list[dict]) -> dict | None:
+    """Match by teams and nearest start time, preserving both games of a doubleheader."""
+    game_start = datetime.fromisoformat(game["start"].replace("Z", "+00:00"))
+    candidates = []
+    for quote in quotes:
+        if quote["home"] != game["home"] or quote["away"] != game["away"]:
+            continue
+        quote_start = datetime.fromisoformat(quote["commence"].replace("Z", "+00:00"))
+        delta = abs((quote_start - game_start).total_seconds())
+        if delta <= 90 * 60:
+            candidates.append((delta, quote))
+    return min(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def observations(years: list[int], key: str, cache_dir: Path):
@@ -104,7 +146,7 @@ def observations(years: list[int], key: str, cache_dir: Path):
         for g in games:
             hid,aid=str(g["home_id"]),str(g["away_id"]); hr=ratings.get(hid,1500.); ar=ratings.get(aid,1500.)
             hs=strength.get(hid,0.); ass=strength.get(aid,0.)
-            q=odds.get((g["home"],g["away"]))
+            q=match_quote(g,odds)
             if q:
                 rows.append({**g,**q,"year":year,"y":1 if g["home_score"]>g["away_score"] else 0,
                              "features":[1.,logit(q["market_home"]),(hr-ar)/400.,(hs-ass)/5.]})
@@ -130,11 +172,6 @@ def metrics(rows,beta):
     brier=float(np.mean((p-y)**2)); mb=float(np.mean((market-y)**2))
     ll=float(-np.mean(y*np.log(np.clip(p,1e-6,1))+(1-y)*np.log(np.clip(1-p,1e-6,1))))
     mll=float(-np.mean(y*np.log(market)+(1-y)*np.log(1-market)))
-    bets=[]
-    for r,prob in zip(rows,p):
-        side_home=prob-r["market_home"]>=.025; side_away=(1-prob)-(1-r["market_home"])>=.025
-        if side_home: bets.append(prob*(decimal(r["home_odds"])-1)-(1-prob) if r["y"] else -1)
-        elif side_away: bets.append((1-prob)*(decimal(r["away_odds"])-1)-prob if not r["y"] else -1)
     # Actual realized flat-stake returns, not model EV.
     actual=[]
     for r,prob in zip(rows,p):
@@ -158,10 +195,12 @@ def main():
     reason="Passed strict 2025 holdout gates" if passed else "Holdout gates not met; wagering remains locked"
     artifact={"version":f"mlb-market-elo-{datetime.now(timezone.utc):%Y%m%d}","trained_at":datetime.now(timezone.utc).isoformat(),
               "train_year":args.train_year,"test_year":args.test_year,"coefficients":beta.tolist(),"ratings":ratings,
+              "feature_names":["intercept","market_logit","elo_difference","run_strength"],
+              "data_quality":{"event_time_matching":True,"doubleheader_safe":True,"max_quote_age_minutes":MAX_QUOTE_AGE_MINUTES,
+                              "minimum_books":MIN_BOOKS,"outlier_filter":True,"decision_window_hours":8},
               "run_strength":strength,"metrics":report,"validation_gate":{"passed":passed,"reason":reason}}
     Path(args.output).write_text(json.dumps(artifact,indent=2),encoding="utf-8")
     print(json.dumps({"validation_gate":artifact["validation_gate"],"metrics":report},indent=2))
 
 
 if __name__=="__main__": main()
-
