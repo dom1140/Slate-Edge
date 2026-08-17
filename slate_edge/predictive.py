@@ -20,6 +20,28 @@ def _logit(p: float) -> float:
 
 
 @dataclass
+class BaseballFactors:
+    """Pregame, home-minus-away feature inputs. None means unavailable, never zero."""
+    starter_quality: float | None = None
+    bullpen_availability: float | None = None
+    confirmed_lineup_value: float | None = None
+    platoon_matchup: float | None = None
+    statcast_quality: float | None = None
+    defense_catching: float | None = None
+    park_weather: float | None = None
+    travel_rest: float | None = None
+
+    def vector(self) -> list[float]:
+        return [float(value or 0.0) for value in (
+            self.starter_quality, self.bullpen_availability, self.confirmed_lineup_value,
+            self.platoon_matchup, self.statcast_quality, self.defense_catching,
+            self.park_weather, self.travel_rest)]
+
+    def missing(self) -> list[str]:
+        return [name for name, value in self.__dict__.items() if value is None]
+
+
+@dataclass
 class ModelContext:
     version: str
     validated: bool
@@ -29,32 +51,40 @@ class ModelContext:
     run_strength: dict[str, float]
     metrics: dict[str, Any]
 
-    def home_probability(self, market_probability: float, home_id: int, away_id: int) -> float:
+    feature_names: list[str] | None = None
+
+    def home_probability(self, market_probability: float, home_id: int, away_id: int,
+                         factors: BaseballFactors | None = None) -> float:
         home_rating = self.ratings.get(str(home_id), 1500.0)
         away_rating = self.ratings.get(str(away_id), 1500.0)
         home_runs = self.run_strength.get(str(home_id), 0.0)
         away_runs = self.run_strength.get(str(away_id), 0.0)
         features = [1.0, _logit(market_probability), (home_rating - away_rating) / 400.0,
                     (home_runs - away_runs) / 5.0]
+        if factors:
+            features.extend(factors.vector())
         return min(.95, max(.05, _sigmoid(sum(a * b for a, b in zip(self.coefficients, features)))))
 
 
 def load_model(path: str | Path) -> ModelContext:
     artifact_path = Path(path)
     if not artifact_path.exists():
-        return ModelContext("research-baseline", False, "No validated artifact has been trained", [], {}, {}, {})
+        return ModelContext("research-baseline", False, "No validated artifact has been trained", [], {}, {}, {}, [])
     data = json.loads(artifact_path.read_text(encoding="utf-8"))
     gate = data.get("validation_gate", {})
     return ModelContext(data.get("version", "unknown"), bool(gate.get("passed")),
                         gate.get("reason", "Validation status unavailable"), data.get("coefficients", []),
-                        data.get("ratings", {}), data.get("run_strength", {}), data.get("metrics", {}))
+                        data.get("ratings", {}), data.get("run_strength", {}), data.get("metrics", {}),
+                        data.get("feature_names", ["intercept", "market_logit", "elo_difference", "run_strength"]))
 
 
 def update_current_season(context: ModelContext, season: int, timeout: int = 20) -> ModelContext:
     """Update only latent team state from completed current-season games; coefficients remain frozen."""
     if not context.coefficients:
         return context
-    ratings, run_strength = dict(context.ratings), dict(context.run_strength)
+    # Historical team state must not carry across an offseason at full strength.
+    ratings = {team: 1500.0 + .65 * (float(value) - 1500.0) for team, value in context.ratings.items()}
+    run_strength = {team: .35 * float(value) for team, value in context.run_strength.items()}
     try:
         params = {"sportId": 1, "startDate": f"{season}-03-01", "endDate": date.today().isoformat(),
                   "gameType": "R"}
@@ -80,5 +110,4 @@ def update_current_season(context: ModelContext, season: int, timeout: int = 20)
     except (requests.RequestException, KeyError, TypeError, ValueError):
         pass
     return ModelContext(context.version, context.validated, context.reason, context.coefficients,
-                        ratings, run_strength, context.metrics)
-
+                        ratings, run_strength, context.metrics, context.feature_names)
