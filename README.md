@@ -89,6 +89,12 @@ Streamlit reruns only when the app is opened, interacted with, or externally awa
 
 For injuries and projected lineups before official orders post, use a licensed provider with explicit coverage/SLA. Add it behind `ContextProvider`; do not scrape or silently treat an incomplete free source as authoritative.
 
+## Model v2 roadmap and data integrity
+
+The training pipeline now matches each quote to the nearest event start (including doubleheaders), rejects stale and market-outlier books, requires at least three agreeing books, and records the pregame decision window in the model artifact. Offseason team ratings are regressed toward league average before current-season updates.
+
+The predictive interface has explicit slots for starting-pitcher quality, bullpen availability, confirmed-lineup value, platoon matchups, Statcast contact quality, defense/catching, park-weather interaction, and travel/rest. Missing inputs remain `unavailable` rather than being silently treated as real observations. These fields do not affect wagers until their coefficients are trained and pass a new forward holdout; the previously inspected 2025 set must not be reused as the final approval test.
+
 ## Product research translated into original patterns
 
 - **[Action Network](https://www.actionnetwork.com/app/):** scan-first Today board, real-time odds/status, and unified bet tracking.
