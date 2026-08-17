@@ -1,0 +1,30 @@
+name: Train and validate MLB model
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy requests
+      - name: Train with paid historical closing snapshots
+        env:
+          HISTORICAL_ODDS_API_KEY: ${{ secrets.HISTORICAL_ODDS_API_KEY }}
+        run: python scripts/train_model.py --train-year 2024 --test-year 2025
+      - name: Commit versioned artifact and reusable normalized cache
+        run: |
+          git config user.name "slateedge-model-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add model_artifact.json data/historical_odds
+          git commit -m "Train and validate MLB model" || exit 0
+          git push
+
