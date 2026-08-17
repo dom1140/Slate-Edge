@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 import requests
 
 from slate_edge.domain import Game, Pitcher, Team
@@ -57,7 +58,7 @@ class MLBLineupProvider:
         self.timeout = timeout
 
     def enrich(self, games: list[Game]) -> list[Game]:
-        for game in games:
+        def enrich_game(game: Game) -> None:
             try:
                 url = f"https://statsapi.mlb.com/api/v1.1/game/{game.id}/feed/live"
                 data = requests.get(url, timeout=self.timeout).json()
@@ -70,5 +71,6 @@ class MLBLineupProvider:
                     game.lineup_note = "Official batting order posted" if len(away_order) >= 9 and len(home_order) >= 9 else "One lineup posted; monitoring the other"
             except (requests.RequestException, ValueError):
                 game.lineup_note = "Lineup feed temporarily unavailable"
+        with ThreadPoolExecutor(max_workers=min(8, max(1, len(games)))) as pool:
+            list(pool.map(enrich_game, games))
         return games
-

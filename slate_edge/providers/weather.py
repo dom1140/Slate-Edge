@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 import requests
 from slate_edge.domain import Game, Weather
 
@@ -24,10 +25,10 @@ MLB_VENUES = {
 
 class OpenMeteoProvider:
     def enrich(self, games: list[Game]) -> list[Game]:
-        for game in games:
+        def enrich_game(game: Game) -> None:
             coords = MLB_VENUES.get(game.venue)
             if not coords:
-                continue
+                return
             try:
                 params = {"latitude": coords[0], "longitude": coords[1], "hourly": "temperature_2m,precipitation_probability,wind_speed_10m", "temperature_unit": "fahrenheit", "wind_speed_unit": "mph", "timezone": "UTC", "forecast_days": 3}
                 data = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=10).json()["hourly"]
@@ -36,5 +37,6 @@ class OpenMeteoProvider:
                 game.weather = Weather(data["temperature_2m"][idx], data["wind_speed_10m"][idx], data["precipitation_probability"][idx], "Forecast", datetime.now(timezone.utc))
             except (requests.RequestException, KeyError, ValueError):
                 pass
+        with ThreadPoolExecutor(max_workers=min(8, max(1, len(games)))) as pool:
+            list(pool.map(enrich_game, games))
         return games
-
