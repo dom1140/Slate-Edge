@@ -15,6 +15,8 @@ An MLB-first, mobile-oriented Streamlit decision desk for daily slates, contextu
 - Automatic recalculation of no-vig market probability, model probability, edge, EV, fractional Kelly, grade, exact stake, and slate exposure cap
 - Local SQLite bet history, settlement, bankroll curve, ROI, CSV export, and CLV
 - Provider interfaces that keep schedule, odds, context, model, and storage replaceable
+- Paid historical-odds training workflow with a frozen later-season validation set
+- Non-bypassable research/validated model gate: bankroll sizing remains locked after a failed backtest
 
 ## Run locally
 
@@ -40,6 +42,23 @@ DATABASE_PATH = "slate_edge.db"
 ```
 
 Only `ODDS_API_KEY` is needed for live prices. MLB schedule/lineup context and Open-Meteo need no key. Never commit `secrets.toml`.
+
+## Training and validation
+
+The manual GitHub Actions workflow in `.github/workflows/train-model.yml` uses a separate
+`HISTORICAL_ODDS_API_KEY` repository secret. It downloads three pregame snapshots per MLB day,
+caches the normalized source responses, trains on 2024, and evaluates the frozen model on 2025.
+
+The live app unlocks stakes only when the artifact satisfies every holdout gate:
+
+- at least 1,800 matched unseen games;
+- Brier score beats the no-vig market by at least 0.0005;
+- log loss beats the no-vig market by at least 0.001;
+- at least 100 wagers meet the 2.5-point edge threshold;
+- positive realized flat-stake ROI at the captured available prices.
+
+Passing those gates is evidence, not a guarantee. A failed gate writes an artifact that keeps the
+app in **RESEARCH MODE**. The UI cannot override that lock.
 
 ## GitHub + Streamlit Community Cloud
 

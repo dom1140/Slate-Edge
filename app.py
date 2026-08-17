@@ -13,6 +13,7 @@ from slate_edge.engine import build_recommendations, decimal_odds
 from slate_edge.providers.mlb import MLBLineupProvider, MLBStatsProvider
 from slate_edge.providers.odds import DemoOddsProvider, TheOddsAPIProvider
 from slate_edge.providers.weather import OpenMeteoProvider
+from slate_edge.predictive import load_model, update_current_season
 from slate_edge.storage import BetStore, clv_percent
 
 st.set_page_config(page_title="SlateEdge v2", page_icon="◆", layout="wide", initial_sidebar_state="collapsed")
@@ -27,6 +28,7 @@ def secret(name: str, default=""):
 
 DB_PATH = secret("DATABASE_PATH", str(Path(__file__).with_name("slate_edge.db")))
 store = BetStore(DB_PATH)
+MODEL_PATH = Path(__file__).with_name("model_artifact.json")
 
 st.markdown("""
 <style>
@@ -118,13 +120,18 @@ with tab_board:
     odds_key = secret("ODDS_API_KEY", "")
     with st.spinner("Building today’s decision board…"):
         games, quotes, errors, is_demo = load_slate(slate_date.isoformat(), odds_key, st.session_state.refresh_nonce)
-    recs = build_recommendations(games, quotes, bankroll, kelly_fraction, max_bet_pct, max_slate_pct, min_edge)
+    model_context = update_current_season(load_model(MODEL_PATH), slate_date.year)
+    recs = build_recommendations(games, quotes, bankroll, kelly_fraction, max_bet_pct, max_slate_pct, min_edge, model_context)
     qualifying = [r for r in recs if r.stake > 0]
     freshest = max((q.fetched_at for q in quotes), default=None)
     m1,m2,m3,m4 = st.columns(4)
     m1.metric("Games", len(games)); m2.metric("Qualified plays", len(qualifying)); m3.metric("Total exposure", f"${sum(r.stake for r in qualifying):,.2f}"); m4.metric("Odds updated", age_label(freshest))
     if is_demo:
         st.markdown('<div class="warning">Demo odds are active. Add ODDS_API_KEY before treating prices, edges, EV, or stakes as live.</div>', unsafe_allow_html=True)
+    if not model_context.validated:
+        st.markdown(f'<div class="warning">RESEARCH MODE · Wager sizing is locked. {esc(model_context.reason)}</div>', unsafe_allow_html=True)
+    else:
+        st.success(f"Validated model active · {model_context.version} · unseen-season gate passed")
     for error in errors: st.warning(error)
     if freshest and (datetime.now(timezone.utc) - freshest).total_seconds() > 600:
         st.markdown('<div class="warning">Odds are more than 10 minutes old. Refresh before making a decision.</div>', unsafe_allow_html=True)
@@ -138,7 +145,10 @@ with tab_board:
         st.markdown(card, unsafe_allow_html=True)
         with st.expander("Why this number"):
             st.write(" • ".join(r.reasons))
-            st.caption("The included model is a transparent market-anchored baseline, not a trained prediction model. Validate and backtest a paid/trained model before increasing risk.")
+            if model_context.validated:
+                st.caption(f"Holdout metrics: {model_context.metrics}. Historical results do not guarantee future performance.")
+            else:
+                st.caption("Research output only. Exact stakes remain locked until the unseen-season validation gate passes.")
             if r.stake > 0 and st.button(f"Log {r.selection} · ${r.stake:.2f}", key=f"log-{g.id}-{r.selection}"):
                 store.add(placed_at=datetime.now(timezone.utc).isoformat(), sport=g.sport, event=f"{g.away.name} @ {g.home.name}", selection=r.selection, market="Moneyline", sportsbook=r.sportsbook, odds=r.odds, stake=r.stake, model_probability=r.model_probability, edge=r.edge, notes="Logged from decision board")
                 st.success("Bet added to portfolio.")
@@ -203,8 +213,11 @@ with tab_data:
 **Recalculation triggers**
 
 Opening the app, pressing **Refresh all feeds**, or expiration of the five-minute cache reloads inputs and recomputes every recommendation. A scheduled worker is required for alerts while nobody has the Streamlit page open.
+
+**Model safety gate**
+
+The paid historical pipeline trains on 2024 and evaluates once on 2025. Wager sizing unlocks only if the frozen model beats the no-vig market on Brier score and log loss, produces at least 100 qualifying holdout wagers, and has positive flat-stake holdout ROI. A failed gate cannot be overridden from the UI.
 """)
     st.caption("Provider failures degrade visibly. SlateEdge never relabels demo or stale data as live.")
 
 st.markdown('<div class="footer-note">SlateEdge is an analytics and record-keeping tool, not a sportsbook or a promise of profit. Confirm prices and availability at your book. If betting stops being fun or affordable, stop.</div>', unsafe_allow_html=True)
-
